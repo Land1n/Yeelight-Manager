@@ -11,8 +11,8 @@ from lamp.network import connect_to_wifi, enable_lan_control
 from manager.core import Core
 from manager.sync import Syncer
 from manager.theme import (ACCENT, BORDER, DANGER, MUTED, MUTED_2, RADIUS, SURFACE_2, SURFACE_3,
-                           TEXT, apply_theme, btn, card, caption, dot, field)
-from manager.widgets import LampCard
+                           TEXT, apply_theme, btn, card, caption, dot, field, set_disabled)
+from manager.widgets import LampCard, RequestFeed
 
 
 def main(page: ft.Page):
@@ -28,22 +28,17 @@ def main(page: ft.Page):
     cards = {}
     last = {}
     busy = {"count": 0}
+    feed = RequestFeed()
 
-    # ---------- Индикаторы шапки и уведомления ----------
-    head_dot = dot(MUTED)
-    head_text = caption("менеджер запущен", MUTED, 12)
+    # ---------- Индикаторы шапки и лента «запрос → ответ» ----------
     lamps_count = caption("ламп: 0", MUTED, 12)
     busy_text = caption("ожидание", MUTED_2, 12)
     busy_ring = ft.ProgressRing(width=16, height=16, stroke_width=2, color=ACCENT, visible=False)
-    banner_text = ft.Text("готово", color=MUTED)
-    banner = ft.Container(banner_text, padding=10, border_radius=RADIUS, bgcolor=SURFACE_2,
-                          border=ft.Border.all(1, BORDER))
-    header = ft.Row([head_dot, head_text, lamps_count, busy_text, busy_ring], spacing=12, wrap=True)
+    header = ft.Row([dot(MUTED), caption("менеджер запущен", MUTED, 12), lamps_count, busy_text,
+                     busy_ring], spacing=12, wrap=True)
 
     def toast(text, ok=True):
-        """Уведомление: строка внизу окна и всплывающее сообщение."""
-        banner_text.value = text
-        banner_text.color = ACCENT if ok else DANGER
+        """Уведомление: всплывающее сообщение."""
         try:
             page.show_dialog(ft.SnackBar(ft.Text(text, color=TEXT), bgcolor=SURFACE_3,
                                          duration=3500))
@@ -51,8 +46,15 @@ def main(page: ft.Page):
             pass
         page.update()
 
+    def lock(flag):
+        """Пока запрос в полёте, интерактивные виджеты недоступны — повторов не будет."""
+        set_disabled(tabs, flag)
+        busy_ring.visible = flag
+        busy_text.value = f"выполняется: {busy['count']}" if flag else "ожидание"
+        page.update()
+
     def perform(action):
-        kind, ip = action.get("type"), action.get("ip")
+        kind, ip = action["type"], action.get("ip")
         if kind == "undo":
             return core.undo(ip)
         if kind == "remove":
@@ -60,32 +62,37 @@ def main(page: ft.Page):
             return f"лампа {ip} удалена"
         return core.command(action)
 
-    def done(label, ip, message, ok):
+    def finish(key, label, ip, message, ok, started):
+        """Ответ пришёл: записываем его в ленту и снимаем блокировку."""
         busy["count"] = max(0, busy["count"] - 1)
-        busy_ring.visible = busy["count"] > 0
-        busy_text.value = f"выполняется: {busy['count']}" if busy["count"] else "ожидание"
+        feed.finish(key, message, ok, round(time.monotonic() - started, 1))
+        lock(busy["count"] > 0)
         if ip in cards:
             cards[ip].set_busy(False)
             cards[ip].report(f"{label}: {message}", ok)
         mark = "✓" if ok else "✕"
         toast(f"{mark} {label} · {ip}: {message}" if ip else f"{mark} {label}: {message}", ok)
 
+    def worker(key, label, call, ip):
+        started = time.monotonic()
+        try:
+            finish(key, label, ip, str(call() or "готово"), True, started)
+        except Exception as ex:
+            finish(key, label, ip, str(ex), False, started)
+
     def submit(label, call, ip=None):
-        """Фоновое действие: индикатор загрузки и уведомление о результате."""
+        """Один запрос за раз: лента, спиннер, блокировка виджетов до ответа."""
+        if busy["count"]:
+            toast("дождитесь ответа на предыдущий запрос", ok=False)
+            return
+        key = feed.start(label, ip)
         busy["count"] += 1
-        busy_ring.visible = True
-        busy_text.value = f"выполняется: {busy['count']}"
+        lock(True)
         if ip in cards:
             cards[ip].set_busy(True)
             cards[ip].report(f"→ {label}")
         toast(f"→ {label} · {ip}" if ip else f"→ {label}")
-        page.run_thread(lambda: worker(label, call, ip))
-
-    def worker(label, call, ip):
-        try:
-            done(label, ip, str(call() or "готово"), True)
-        except Exception as ex:
-            done(label, ip, str(ex), False)
+        page.run_thread(lambda: worker(key, label, call, ip))
 
     def run(label, action):
         submit(label, lambda: perform(action), action.get("ip"))
@@ -108,8 +115,7 @@ def main(page: ft.Page):
         return handler
 
     def save_server():
-        core.update_config(server_url=server_url.value.strip(),
-                           access_key=access_key.value.strip())
+        core.update_config(server_url=server_url.value.strip(), access_key=access_key.value.strip())
         toast("настройки сервера сохранены")
 
     def toggle_sync():
@@ -125,8 +131,7 @@ def main(page: ft.Page):
         toast("синхронизация запущена")
 
     connection_tab = ft.Column([
-        ft.Row([server_url]),
-        ft.Row([access_key]),
+        ft.Row([server_url]), ft.Row([access_key]),
         ft.Row([btn("Сохранить", safe(save_server), icon=ft.Icons.SAVE),
                 btn("Запуск / стоп", safe(toggle_sync), primary=True, icon=ft.Icons.SYNC),
                 sync_dot, sync_text]),
@@ -251,18 +256,12 @@ def main(page: ft.Page):
                          expand=True)
 
     tabs = ft.Tabs(
-        selected_index=0,
-        length=5,
-        expand=True,
+        selected_index=0, length=5, expand=True,
         content=ft.Column([
-            ft.TabBar(tabs=[
-                ft.Tab(label="Подключение"),
-                ft.Tab(label="Лампы"),
-                ft.Tab(label="Режимы"),
-                ft.Tab(label="Настройка"),
-                ft.Tab(label="Журнал"),
-            ], label_color=ACCENT, unselected_label_color=MUTED, indicator_color=ACCENT,
-               divider_color=BORDER),
+            ft.TabBar(tabs=[ft.Tab(label=name) for name in
+                            ("Подключение", "Лампы", "Режимы", "Настройка", "Журнал")],
+                      label_color=ACCENT, unselected_label_color=MUTED, indicator_color=ACCENT,
+                      divider_color=BORDER),
             ft.TabBarView(expand=True, controls=[
                 connection_tab, lamps_tab, modes_tab, settings_tab, logs_tab,
             ]),
@@ -278,9 +277,11 @@ def main(page: ft.Page):
         refresh_lamps(state)
         refresh_modes(state)
         refresh_log(state)
+        if busy["count"]:  # пересобранные карточки тоже должны оставаться заблокированными
+            set_disabled(tabs, True)
         page.update()
 
-    page.add(header, tabs, banner)
+    page.add(header, tabs, feed.view)
 
     def ticker():
         while True:

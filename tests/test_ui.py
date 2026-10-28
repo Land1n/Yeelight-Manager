@@ -1,11 +1,12 @@
-"""Окно Flet собирается без реального окна: карточки, ползунки, уведомления."""
+"""Окно Flet собирается без реального окна: карточки, лента запросов, блокировка."""
 
 import flet as ft
 import pytest
 
 import manager.app as app_module
 from manager.core import Core
-from manager.widgets import LampCard
+from manager.theme import walk
+from manager.widgets import LampCard, RequestFeed
 
 
 class FakeLamp:
@@ -77,37 +78,77 @@ def ui(tmp_path, monkeypatch):
     core.add("10.0.0.1")
     monkeypatch.setattr(app_module, "Core", lambda: core)
     captured = {}
+    feed_ref = {}
 
     class SpyCard(LampCard):
         def __init__(self, ip, run):
             captured["run"] = run
             super().__init__(ip, run)
 
+    class SpyFeed(RequestFeed):
+        def __init__(self, *a, **k):
+            super().__init__(*a, **k)
+            feed_ref["feed"] = self
+
     monkeypatch.setattr(app_module, "LampCard", SpyCard)
+    monkeypatch.setattr(app_module, "RequestFeed", SpyFeed)
     page = StubPage()
     app_module.main(page)
-    return page, core, captured["run"]
+    return page, core, captured["run"], feed_ref["feed"]
+
+
+def _tabs(page):
+    return next(c for c in page.controls if isinstance(c, ft.Tabs))
 
 
 def test_window_builds_lamp_card(ui):
-    page, core, _ = ui
+    page, core, _, _ = ui
     assert page.controls, "окно не собрало виджеты"
     assert len(core.state().lamps) == 1
 
 
-def test_slider_command_reports_result(ui):
-    page, core, run = ui
+def test_feed_shows_request_and_answer(ui):
+    page, core, run, feed = ui
     run("яркость", {"type": "set_brightness", "ip": "10.0.0.1", "value": 90})
     page.run_jobs()
-    assert any(text.startswith("→ яркость") for text in page.toasts)
-    assert any("✓ яркость" in text and "set_brightness" in text for text in page.toasts)
+    item = feed.items[-1]
+    assert item["status"] == "ok"
+    assert "set_brightness" in item["answer"]
+    assert item["ip"] == "10.0.0.1"
+
+
+def test_widgets_locked_while_request_in_flight(ui):
+    page, core, run, feed = ui
+    run("яркость", {"type": "set_brightness", "ip": "10.0.0.1", "value": 90})
+    tabs = _tabs(page)
+    # Пока worker не вызван — виджеты заблокированы
+    disabled_buttons = [c for c in walk(tabs) if isinstance(c, ft.Button) and c.disabled]
+    assert len(disabled_buttons) > 0, "кнопки должны быть заблокированы во время запроса"
+    # Запускаем воркер — ответ приходит
+    page.run_jobs()
+    # После ответа — разблокированы
+    still_disabled = [c for c in walk(tabs) if isinstance(c, ft.Button) and c.disabled]
+    assert len(still_disabled) == 0, "кнопки разблокируются после ответа"
+
+
+def test_second_request_rejected_until_answer(ui):
+    page, core, run, feed = ui
+    run("яркость", {"type": "set_brightness", "ip": "10.0.0.1", "value": 90})
+    # Второй вызов пока busy
+    run("цвет", {"type": "set_hex", "ip": "10.0.0.1", "value": "ff0000"})
+    assert len(page.toasts) == 2  # "→ яркость" + "дождитесь ответа"
+    assert "дождитесь" in page.toasts[1].lower(), "должно быть предупреждение"
+    assert len(feed.items) == 1, "в ленте только первый запрос"
+    page.run_jobs()
 
 
 def test_failed_action_notifies_error(ui):
-    page, _, run = ui
+    page, core, run, feed = ui
     run("переключение", {"type": "toggle", "ip": "10.9.9.9"})
     page.run_jobs()
     assert any(text.startswith("✕") for text in page.toasts)
+    item = feed.items[-1]
+    assert item["status"] == "err"
 
 
 def test_card_sliders_send_commands():
@@ -142,7 +183,7 @@ def test_card_layout_is_flutter_safe():
         expanded = [child for child in _children(node) if getattr(child, "expand", None)]
         if isinstance(node, ft.Column):
             assert not expanded, "expand у ребёнка Column внутри ListView даёт серый блок"
-        if isinstance(node, ft.Row) and node.wrap:
+        if isinstance(node, ft.Row) and getattr(node, "wrap", None):
             assert not expanded, "wrap-Row не принимает expand-детей"
         checked += 1
     assert checked > 10, "дерево карточки не обошло вложенные виджеты"

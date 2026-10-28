@@ -1,14 +1,18 @@
-"""Карточка лампы в окне Flet: индикаторы состояния, ползунки, откат."""
+"""Карточка лампы и лента запросов в окне Flet."""
 
 from __future__ import annotations
 
+import time
+
 import flet as ft
 
-from manager.theme import (ACCENT, BORDER, CYAN, DANGER, MUTED, MUTED_2, SURFACE_3, TEXT, btn,
-                           card, caption, dot, field, meter, slider)
+from manager.theme import (ACCENT, BORDER, CYAN, DANGER, MUTED, MUTED_2, RADIUS, SURFACE_2,
+                           SURFACE_3, TEXT, btn, card, caption, dot, field, meter, slider)
 
 CT_MIN, CT_MAX = 1700, 6500
 CHANNELS = (("r", 255, "#ff6b6b"), ("g", 128, "#7cf29a"), ("b", 60, "#6bb8ff"))
+FEED_LIMIT = 20
+FEED_STATUS = {"run": (CYAN, "→"), "ok": (ACCENT, "✓"), "err": (DANGER, "✕")}
 
 class LampCard:
     """Одна лампа. Значения ползунков подтягиваются с лампы, пока их не двигают."""
@@ -128,3 +132,57 @@ class LampCard:
         if isinstance(rgb, int):
             for name, channel in zip(("r", "g", "b"), self.rgb):
                 self.channels[name].value = channel
+
+
+class RequestFeed:
+    """Лента «запрос → ответ» над вкладками, как уведомления на сайте."""
+
+    def __init__(self, limit=FEED_LIMIT):
+        self.limit = limit
+        self.rows = ft.ListView(height=112, spacing=6, auto_scroll=True)
+        self.title = caption("запрошено: 0 · отвечено: 0", MUTED_2, 11)
+        self.view = card(ft.Column([self.title, self.rows], spacing=4), padding=8)
+        self.items = []
+        self._seq = 0
+        self._sent = self._answered = 0
+
+    def start(self, label, ip=None):
+        """Запрос ушёл: сразу виден в ленте со статусом «выполняется»."""
+        self._seq += 1
+        self._sent += 1
+        item = {"id": self._seq, "label": label, "ip": ip, "time": time.strftime("%H:%M:%S"),
+                "status": "run", "answer": "выполняется…"}
+        self.items.append(item)
+        del self.items[:-self.limit]
+        self._draw()
+        return item["id"]
+
+    def finish(self, key, message, ok, seconds):
+        """Ответ пришёл: та же строка ленты получает результат и время выполнения."""
+        self._answered += 1
+        for item in self.items:
+            if item["id"] == key:
+                item["status"] = "ok" if ok else "err"
+                item["answer"] = f"{message} · {seconds} с"
+        self._draw()
+
+    def _draw(self):
+        self.title.value = f"запрошено: {self._sent} · отвечено: {self._answered}"
+        self.rows.controls = [self._row(item) for item in self.items]
+
+    def _row(self, item):
+        color, mark = FEED_STATUS[item["status"]]
+        answer = MUTED if item["status"] != "err" else DANGER
+        what = " · ".join(part for part in (item["label"], item["ip"]) if part)
+        return ft.Container(
+            content=ft.Row([
+                ft.Text(mark, color=color, weight=ft.FontWeight.BOLD),
+                ft.Column([ft.Text(what, color=TEXT, size=12.5),
+                           ft.Text(item["answer"], color=answer, size=11.5)],
+                          expand=True, spacing=1),
+                ft.Text(item["time"], color=MUTED_2, size=11),
+            ], spacing=8, vertical_alignment=ft.CrossAxisAlignment.START),
+            padding=7, border_radius=RADIUS, bgcolor=SURFACE_2,
+            border=ft.Border(left=ft.BorderSide(3, color), top=ft.BorderSide(1, BORDER),
+                             right=ft.BorderSide(1, BORDER), bottom=ft.BorderSide(1, BORDER)),
+        )

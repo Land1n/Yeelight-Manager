@@ -57,3 +57,29 @@ def slider(minimum, maximum, value, label, color=ACCENT, **kwargs):
 
 def caption(text, color=MUTED, size=12):
     return ft.Text(text, color=color, size=size)
+
+
+# Виджеты, которые отправляют команды: их блокируем на время запроса.
+INTERACTIVE = (ft.Button, ft.IconButton, ft.Slider, ft.TextField, ft.Dropdown, ft.Checkbox,
+               ft.Switch)
+
+
+def walk(root):
+    """Обойти виджет и всех вложенных потомков."""
+    stack = [root]
+    while stack:
+        node = stack.pop()
+        yield node
+        for attr in ("controls", "tabs", "views", "content"):
+            child = getattr(node, attr, None)
+            if isinstance(child, (list, tuple)):
+                stack.extend(item for item in child if isinstance(item, ft.Control))
+            elif isinstance(child, ft.Control):
+                stack.append(child)
+
+
+def set_disabled(root, flag):
+    """Заблокировать или разблокировать все интерактивные виджеты под деревом."""
+    for node in walk(root):
+        if isinstance(node, INTERACTIVE):
+            node.disabled = flag
