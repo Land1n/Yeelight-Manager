@@ -10,141 +10,161 @@ from lamp.network import connect_to_wifi, enable_lan_control
 
 from manager.core import Core
 from manager.sync import Syncer
-
-# Цвета и размеры совпадают с server/frontend/src/app.css (тёмная тема сайта).
-BG, SURFACE, SURFACE_2, SURFACE_3 = "#080b10", "#10151e", "#151c27", "#1b2431"
-BORDER, TEXT, MUTED = "#3a4658", "#e9eef6", "#93a3b8"
-ACCENT, INK, DANGER, CONSOLE_BG = "#b6f24a", "#0b1206", "#ff8080", "#070a0f"
-RADIUS = 10
-
-
-def apply_theme(page):
-    theme = ft.Theme(
-        font_family="Segoe UI",
-        color_scheme=ft.ColorScheme(primary=ACCENT, on_primary=INK, surface=SURFACE,
-                                    on_surface=TEXT, outline=BORDER, error=DANGER),
-    )
-    page.theme = theme
-    page.dark_theme = theme
-    page.theme_mode = ft.ThemeMode.DARK
-    page.bgcolor = BG
-
-
-def btn(text, on_click, primary=False, icon=None):
-    return ft.Button(text, icon=icon, on_click=on_click,
-                     bgcolor=ACCENT if primary else SURFACE_3,
-                     color=INK if primary else TEXT,
-                     style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=RADIUS)))
-
-
-def field(label, **kwargs):
-    return ft.TextField(label=label, border_radius=RADIUS, border_color=BORDER,
-                        focused_border_color=ACCENT, bgcolor=SURFACE_2, filled=True,
-                        label_style=ft.TextStyle(color=MUTED), **kwargs)
-
-
-def card(content):
-    return ft.Container(content=content, padding=12, border_radius=14, bgcolor=SURFACE_2,
-                        border=ft.Border.all(1, BORDER))
+from manager.theme import (ACCENT, BORDER, DANGER, MUTED, MUTED_2, RADIUS, SURFACE_2, SURFACE_3,
+                           TEXT, apply_theme, btn, card, caption, dot, field)
+from manager.widgets import LampCard
 
 
 def main(page: ft.Page):
     page.title = "Yeelight manager"
-    page.window.width = 900
-    page.window.height = 680
+    page.window.width = 980
+    page.window.height = 760
     page.padding = 12
     apply_theme(page)
 
     core = Core()
     core.start()
     syncer = Syncer(core)
-    msg = ft.Text("")
+    cards = {}
+    last = {}
+    busy = {"count": 0}
 
-    def notify(text):
-        msg.value = text
+    # ---------- Индикаторы шапки и уведомления ----------
+    head_dot = dot(MUTED)
+    head_text = caption("менеджер запущен", MUTED, 12)
+    lamps_count = caption("ламп: 0", MUTED, 12)
+    busy_text = caption("ожидание", MUTED_2, 12)
+    busy_ring = ft.ProgressRing(width=16, height=16, stroke_width=2, color=ACCENT, visible=False)
+    banner_text = ft.Text("готово", color=MUTED)
+    banner = ft.Container(banner_text, padding=10, border_radius=RADIUS, bgcolor=SURFACE_2,
+                          border=ft.Border.all(1, BORDER))
+    header = ft.Row([head_dot, head_text, lamps_count, busy_text, busy_ring], spacing=12, wrap=True)
+
+    def toast(text, ok=True):
+        """Уведомление: строка внизу окна и всплывающее сообщение."""
+        banner_text.value = text
+        banner_text.color = ACCENT if ok else DANGER
+        try:
+            page.show_dialog(ft.SnackBar(ft.Text(text, color=TEXT), bgcolor=SURFACE_3,
+                                         duration=3500))
+        except Exception:
+            pass
         page.update()
 
-    def guarded(fn):
-        """Запуск операции с сообщением об ошибке вместо падения UI."""
-        def run(*_):
-            try:
-                notify(fn() or "готово")
-            except Exception as ex:
-                notify(f"ошибка: {ex}")
-        return run
+    def perform(action):
+        kind, ip = action.get("type"), action.get("ip")
+        if kind == "undo":
+            return core.undo(ip)
+        if kind == "remove":
+            core.remove(ip)
+            return f"лампа {ip} удалена"
+        return core.command(action)
 
-    def in_background(fn):
-        def run(*_):
-            def job():
-                try:
-                    notify(fn() or "готово")
-                except Exception as ex:
-                    notify(f"ошибка: {ex}")
-            page.run_thread(job)
-        return run
+    def done(label, ip, message, ok):
+        busy["count"] = max(0, busy["count"] - 1)
+        busy_ring.visible = busy["count"] > 0
+        busy_text.value = f"выполняется: {busy['count']}" if busy["count"] else "ожидание"
+        if ip in cards:
+            cards[ip].set_busy(False)
+            cards[ip].report(f"{label}: {message}", ok)
+        mark = "✓" if ok else "✕"
+        toast(f"{mark} {label} · {ip}: {message}" if ip else f"{mark} {label}: {message}", ok)
 
-    # Сигнатуры последней отрисовки: список перестраивается только при изменении данных,
-    # иначе тикер каждую секунду заменяет кнопки и клики теряются.
-    last = {}
+    def submit(label, call, ip=None):
+        """Фоновое действие: индикатор загрузки и уведомление о результате."""
+        busy["count"] += 1
+        busy_ring.visible = True
+        busy_text.value = f"выполняется: {busy['count']}"
+        if ip in cards:
+            cards[ip].set_busy(True)
+            cards[ip].report(f"→ {label}")
+        toast(f"→ {label} · {ip}" if ip else f"→ {label}")
+        page.run_thread(lambda: worker(label, call, ip))
+
+    def worker(label, call, ip):
+        try:
+            done(label, ip, str(call() or "готово"), True)
+        except Exception as ex:
+            done(label, ip, str(ex), False)
+
+    def run(label, action):
+        submit(label, lambda: perform(action), action.get("ip"))
 
     # ---------- Подключение ----------
-    server_url = field("Адрес сервера", value=core.config["server_url"], expand=True)
+    server_url = field("Адрес сервера", value=core.config["server_url"], expand=True,
+                       hint_text="http://127.0.0.1:8000")
     access_key = field("Ключ доступа", value=core.config["access_key"],
                        password=True, can_reveal_password=True, expand=True)
-    sync_status = ft.Text("отключено", color=MUTED)
+    sync_dot = dot(MUTED)
+    sync_text = caption("отключено", MUTED, 12)
 
-    def save_server(*_):
-        core.update_config(server_url=server_url.value.strip(), access_key=access_key.value.strip())
-        return "настройки сервера сохранены"
+    def safe(fn):
+        """Синхронный обработчик: ошибку показываем уведомлением, а не падением окна."""
+        def handler(_=None):
+            try:
+                fn()
+            except Exception as ex:
+                toast(str(ex), ok=False)
+        return handler
 
-    def toggle_sync(*_):
+    def save_server():
+        core.update_config(server_url=server_url.value.strip(),
+                           access_key=access_key.value.strip())
+        toast("настройки сервера сохранены")
+
+    def toggle_sync():
         if syncer.running:
             syncer.stop()
-            return "синхронизация остановлена"
+            toast("синхронизация остановлена")
+            return
         save_server()
+        if not server_url.value.strip():
+            toast("укажите адрес сервера, например http://127.0.0.1:8000", ok=False)
+            return
         syncer.start()
-        return "синхронизация запущена"
+        toast("синхронизация запущена")
 
     connection_tab = ft.Column([
         ft.Row([server_url]),
         ft.Row([access_key]),
-        ft.Row([btn("Сохранить", guarded(save_server), icon=ft.Icons.SAVE),
-                btn("Запуск / стоп", guarded(toggle_sync), primary=True, icon=ft.Icons.SYNC),
-                sync_status]),
+        ft.Row([btn("Сохранить", safe(save_server), icon=ft.Icons.SAVE),
+                btn("Запуск / стоп", safe(toggle_sync), primary=True, icon=ft.Icons.SYNC),
+                sync_dot, sync_text]),
     ])
 
     # ---------- Лампы ----------
-    lamps_list = ft.ListView(expand=True, spacing=6)
+    lamps_list = ft.ListView(expand=True, spacing=10)
     add_ip = field("IP лампы", width=220)
 
     def refresh_lamps(state):
-        sig = [(lamp.ip, lamp.online) for lamp in state.lamps]
-        if sig == last.get("lamps"):
-            return
-        last["lamps"] = sig
-        lamps_list.controls.clear()
+        lamps_count.value = (f"ламп: {len(state.lamps)} · в сети: "
+                             f"{sum(1 for lamp in state.lamps if lamp.online)}")
+        ips = [lamp.ip for lamp in state.lamps]
+        if ips != last.get("ips"):
+            last["ips"] = ips
+            for ip in [ip for ip in cards if ip not in ips]:
+                cards.pop(ip)
+            lamps_list.controls.clear()
+            for ip in ips:
+                cards.setdefault(ip, LampCard(ip, run))
+                lamps_list.controls.append(cards[ip].view)
         for lamp in state.lamps:
-            status = "онлайн" if lamp.online else "офлайн" if lamp.online is False else "нет данных"
-            lamps_list.controls.append(card(ft.Row([
-                ft.Text(f"{lamp.ip} — {status}", expand=True),
-                ft.IconButton(ft.Icons.POWER_SETTINGS_NEW, tooltip="Вкл/выкл", icon_color=ACCENT,
-                              on_click=guarded(lambda ip=lamp.ip: core.command(
-                                  {"type": "toggle", "ip": ip}))),
-                ft.IconButton(ft.Icons.UNDO, tooltip="Отменить", icon_color=TEXT,
-                              on_click=guarded(lambda ip=lamp.ip: core.undo(ip))),
-                ft.IconButton(ft.Icons.DELETE, tooltip="Удалить", icon_color=DANGER,
-                              on_click=guarded(lambda ip=lamp.ip: core.remove(ip))),
-            ])))
+            cards[lamp.ip].update(lamp)
 
-    def add_lamp(*_):
-        core.add(add_ip.value)
+    def add_lamp():
+        ip = (add_ip.value or "").strip()
+        if not ip:
+            toast("введите IP лампы", ok=False)
+            return
+        submit("добавление лампы", lambda: f"лампа {core.add(ip)} добавлена", ip)
         add_ip.value = ""
-        return "лампа добавлена"
+
+    def find_lamps():
+        submit("поиск в сети", lambda: f"найдено: {len(core.discover())}")
 
     lamps_tab = ft.Column([
-        ft.Row([add_ip, btn("Добавить", guarded(add_lamp), primary=True),
-                btn("Найти в сети", in_background(lambda: f"найдено: {len(core.discover())}"),
-                    icon=ft.Icons.SEARCH)]),
+        ft.Row([add_ip, btn("Добавить", safe(add_lamp), primary=True),
+                btn("Найти в сети", safe(find_lamps), icon=ft.Icons.SEARCH)]),
         lamps_list,
     ], expand=True)
 
@@ -152,8 +172,10 @@ def main(page: ft.Page):
     modes_list = ft.ListView(expand=True, spacing=6)
     mode_lamp = ft.Dropdown(label="Лампа", width=220, options=[], border_radius=RADIUS,
                             border_color=BORDER, bgcolor=SURFACE_2, filled=True)
+    modes_ring = ft.ProgressRing(width=16, height=16, stroke_width=2, color=ACCENT, visible=False)
 
     def refresh_modes(state):
+        modes_ring.visible = any(mode["running"] for mode in state.modes)
         sig = [(m["name"], m["running"], m["running_ip"], m["last_error"]) for m in state.modes]
         lamp_ips = [lamp.ip for lamp in state.lamps]
         if sig != last.get("modes"):
@@ -166,17 +188,23 @@ def main(page: ft.Page):
                 modes_list.controls.append(card(ft.Row([
                     ft.Text(f"{name} — {run_text}{error}", expand=True),
                     ft.IconButton(ft.Icons.PLAY_ARROW, tooltip="Запуск", icon_color=ACCENT,
-                                  on_click=guarded(lambda n=name: core.start_mode(n, mode_lamp.value))),
+                                  on_click=click(f"режим {name}",
+                                                  lambda n=name: core.start_mode(n, mode_lamp.value))),
                     ft.IconButton(ft.Icons.STOP, tooltip="Стоп", icon_color=TEXT,
-                                  on_click=guarded(lambda n=name: core.stop_mode(n))),
+                                  on_click=click(f"стоп режима {name}",
+                                                 lambda n=name: core.stop_mode(n))),
                     ft.IconButton(ft.Icons.DELETE, tooltip="Удалить", icon_color=DANGER,
-                                  on_click=guarded(lambda n=name: core.delete_mode(n))),
+                                  on_click=click(f"удаление режима {name}",
+                                                 lambda n=name: core.delete_mode(n))),
                 ])))
         if lamp_ips != last.get("mode_lamps"):
             last["mode_lamps"] = lamp_ips
             mode_lamp.options = [ft.DropdownOption(key=ip, text=ip) for ip in lamp_ips]
 
-    modes_tab = ft.Column([ft.Row([mode_lamp]), modes_list], expand=True)
+    def click(label, call):
+        return lambda _=None: submit(label, call)
+
+    modes_tab = ft.Column([ft.Row([mode_lamp, modes_ring]), modes_list], expand=True)
 
     # ---------- Настройка (Wi-Fi и LAN Control) ----------
     wifi_ip = field("IP лампы", width=220)
@@ -187,13 +215,14 @@ def main(page: ft.Page):
     token = field("Токен (необязательно)", width=260)
 
     def wifi_job():
-        result = connect_to_wifi(wifi_ip.value.strip(), ssid.value, wifi_password.value,
+        result = connect_to_wifi((wifi_ip.value or "").strip(), ssid.value or "",
+                                 wifi_password.value or "",
                                  enable_lan_control=lan_check.value)
         core.log(f"Wi-Fi: {result}")
         return str(result)
 
     def lan_job():
-        result = enable_lan_control(lan_ip.value.strip(), token.value.strip() or None)
+        result = enable_lan_control((lan_ip.value or "").strip(), (token.value or "").strip() or None)
         core.log(f"LAN Control: {result}")
         return str(result)
 
@@ -201,11 +230,11 @@ def main(page: ft.Page):
         ft.Text("Подключение лампы к Wi-Fi", weight=ft.FontWeight.BOLD),
         ft.Row([wifi_ip, ssid]),
         ft.Row([wifi_password, lan_check]),
-        btn("Подключить к Wi-Fi", in_background(wifi_job), primary=True),
+        btn("Подключить к Wi-Fi", click("Wi-Fi", wifi_job), primary=True),
         ft.Divider(color=BORDER),
         ft.Text("LAN Control", weight=ft.FontWeight.BOLD),
         ft.Row([lan_ip, token]),
-        btn("Включить LAN Control", in_background(lan_job), primary=True),
+        btn("Включить LAN Control", click("LAN Control", lan_job), primary=True),
     ], scroll=ft.ScrollMode.AUTO)
 
     # ---------- Журнал ----------
@@ -215,9 +244,10 @@ def main(page: ft.Page):
         if state.log == last.get("log"):
             return
         last["log"] = list(state.log)
-        log_view.controls = [ft.Text(line, selectable=True, color=MUTED) for line in state.log]
+        log_view.controls = [ft.Text(line, selectable=True, color=MUTED, size=12)
+                             for line in state.log]
 
-    logs_tab = ft.Column([card(log_view)], expand=True)
+    logs_tab = ft.Column([caption("события ядра", MUTED_2, 11), card(log_view)], expand=True)
 
     tabs = ft.Tabs(
         selected_index=0,
@@ -236,19 +266,20 @@ def main(page: ft.Page):
                 connection_tab, lamps_tab, modes_tab, settings_tab, logs_tab,
             ]),
         ], expand=True),
-        on_change=lambda e: refresh_all(),
     )
 
     def refresh_all():
-        sync_status.value = ("подключено" if syncer.connected else "нет связи") if syncer.running \
-            else "отключено"
+        connected = syncer.running and syncer.connected
+        sync_dot.bgcolor = ACCENT if connected else (DANGER if syncer.running else MUTED)
+        sync_text.value = ("подключено" if connected
+                           else "нет связи" if syncer.running else "отключено")
         state = core.state()
         refresh_lamps(state)
         refresh_modes(state)
         refresh_log(state)
         page.update()
 
-    page.add(tabs, msg)
+    page.add(header, tabs, banner)
 
     def ticker():
         while True:
