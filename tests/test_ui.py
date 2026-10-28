@@ -122,3 +122,27 @@ def test_card_sliders_send_commands():
     assert calls[0] == {"type": "set_rgb", "ip": "10.0.0.1", "r": 7, "g": 0x20, "b": 0x30}
     assert calls[1]["type"] == "set_color_temp"
     assert calls[2] == {"type": "set_hex", "ip": "10.0.0.1", "value": "ffffff"}
+
+
+def _children(node):
+    kids = list(getattr(node, "controls", None) or [])
+    content = getattr(node, "content", None)
+    if isinstance(content, ft.Control):
+        kids.append(content)
+    return kids
+
+
+def test_card_layout_is_flutter_safe():
+    """Карточка лежит в ListView: expand внутри Column и expand в wrap-Row ломают разметку."""
+    stack = [LampCard("10.0.0.1", lambda *args: None).view]
+    checked = 0
+    while stack:
+        node = stack.pop()
+        stack.extend(_children(node))
+        expanded = [child for child in _children(node) if getattr(child, "expand", None)]
+        if isinstance(node, ft.Column):
+            assert not expanded, "expand у ребёнка Column внутри ListView даёт серый блок"
+        if isinstance(node, ft.Row) and node.wrap:
+            assert not expanded, "wrap-Row не принимает expand-детей"
+        checked += 1
+    assert checked > 10, "дерево карточки не обошло вложенные виджеты"

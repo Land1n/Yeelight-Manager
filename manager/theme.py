@@ -36,18 +36,18 @@ def field(label, **kwargs):
                         label_style=ft.TextStyle(color=MUTED), **kwargs)
 
 
-def card(content, bgcolor=SURFACE_2, padding=12):
+def card(content, bgcolor=SURFACE_2, padding=12, expand=False):
     return ft.Container(content=content, padding=padding, border_radius=CARD_RADIUS,
-                        bgcolor=bgcolor, border=ft.Border.all(1, BORDER))
+                        bgcolor=bgcolor, border=ft.Border.all(1, BORDER), expand=expand)
 
 
 def dot(color=MUTED, size=10):
     return ft.Container(width=size, height=size, border_radius=size, bgcolor=color)
 
 
-def meter(color=ACCENT, value=0):
+def meter(color=ACCENT, value=0, **kwargs):
     return ft.ProgressBar(value=value, color=color, bgcolor=SURFACE_3, border_radius=999,
-                          bar_height=6)
+                          bar_height=6, **kwargs)
 
 
 def slider(minimum, maximum, value, label, color=ACCENT, **kwargs):

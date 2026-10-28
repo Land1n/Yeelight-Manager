@@ -27,8 +27,9 @@ class LampCard:
         self.swatch = ft.Container(width=30, height=30, border_radius=8, bgcolor=SURFACE_3,
                                    border=ft.Border.all(1, BORDER))
         self.busy = ft.ProgressRing(width=16, height=16, stroke_width=2, color=ACCENT, visible=False)
-        self.bright_meter = meter(ACCENT, 0)
-        self.ct_meter = meter(CYAN, 0)
+        self.bright_meter = meter(ACCENT, 0, expand=True)
+        self.ct_meter = meter(CYAN, 0, expand=True)
+        # expand у ползунков работает только внутри Row: Column в ListView высоты не имеет.
         self.bright = slider(1, 100, 50, "яркость {value}%", expand=True)
         self.ct = slider(CT_MIN, CT_MAX, 4000, "{value} K", color=CYAN, expand=True)
         self.hex_field = field("Цвет (#rrggbb)", width=170, value="#ffffff")
@@ -45,12 +46,12 @@ class LampCard:
 
         rows = ft.Column([
             ft.Row([self.bright_text, self.busy], spacing=8),
-            self.bright_meter,
-            self.bright,
+            ft.Row([self.bright_meter]),
+            ft.Row([self.bright]),
             ft.Row([self.ct_text]),
-            self.ct_meter,
-            self.ct,
-            ft.Row(list(self.channels.values()), spacing=14, wrap=True),
+            ft.Row([self.ct_meter]),
+            ft.Row([self.ct]),
+            ft.Row(list(self.channels.values()), spacing=14),
             ft.Row([self.hex_field,
                     btn("Применить цвет", self._apply_hex, primary=True, icon=ft.Icons.COLORIZE)]),
         ], spacing=6)

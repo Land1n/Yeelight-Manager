@@ -247,7 +247,8 @@ def main(page: ft.Page):
         log_view.controls = [ft.Text(line, selectable=True, color=MUTED, size=12)
                              for line in state.log]
 
-    logs_tab = ft.Column([caption("события ядра", MUTED_2, 11), card(log_view)], expand=True)
+    logs_tab = ft.Column([caption("события ядра", MUTED_2, 11), card(log_view, expand=True)],
+                         expand=True)
 
     tabs = ft.Tabs(
         selected_index=0,
